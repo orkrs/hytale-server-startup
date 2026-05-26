@@ -1,57 +1,80 @@
-# Hytale Server Setup
+# Hytale Server Setup v2.0
 
-Автоматическая установка и запуск Hytale Dedicated Server на Ubuntu VDS.
+Полностью автоматическая установка и запуск Hytale Dedicated Server на Ubuntu VDS.
 
 ## Быстрый старт
 
+**Одна команда — и сервер запущен:**
+
 ```bash
-# Скачать и запустить (всё в одной команде)
 curl -fsSL https://raw.githubusercontent.com/orkrs/hytale-server-startup/main/setup.sh | sudo bash
 ```
 
+## Что делает скрипт
+
+### При первом запуске (всё автоматически):
+1. ✅ Устанавливает **Java 25** (Temurin/Adoptium)
+2. ✅ Устанавливает зависимости (screen, curl, jq, unzip)
+3. ✅ Скачивает **Hytale Downloader** (официальный CLI)
+4. ✅ Через downloader скачивает **HytaleServer.jar** и **Assets.zip** (~3.3 ГБ)
+   - ⚠ При первом запуске downloader попросит OAuth-авторизацию (ссылка + код в браузер)
+5. ✅ Открывает порт **5520/UDP** в файрволе
+6. ✅ Запускает сервер в screen-сессии
+7. ✅ Показывает IP для подключения
+
+### При повторных запусках:
+- Проверяет что всё установлено
+- Просто запускает сервер
+
 ## Требования
 
-- Ubuntu 22.04+ (или совместимый дистрибутив)
-- Минимум 4 GB RAM
-- ~5 GB свободного места (3.3 GB ассеты + сервер)
+- Ubuntu 22.04+ (или совместимый)
+- Минимум **4 GB RAM**
+- ~5 GB свободного места
 - Root-доступ
+- Доступ в интернет (для скачивания файлов)
 
 ## Установка
 
-### 1. Клонируй репозиторий
+### Вариант 1: Одна команда (рекомендуется)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/orkrs/hytale-server-startup/main/setup.sh | sudo bash
+```
+
+### Вариант 2: Вручную
 
 ```bash
 git clone https://github.com/orkrs/hytale-server-startup.git
 cd hytale-server-startup
-```
-
-### 2. Загрузи файлы сервера
-
-Помести в папку `/opt/hytale-server/`:
-- `Assets.zip` (~3.3 GB) — ассеты сервера
-- `HytaleServer.jar` — JAR сервера
-
-Или скопируй с локальной машины:
-
-```bash
-scp Assets.zip user@<IP>:/opt/hytale-server/
-scp HytaleServer.jar user@<IP>:/opt/hytale-server/
-```
-
-### 3. Запусти скрипт
-
-```bash
 sudo bash setup.sh
 ```
 
-Скрипт автоматически:
-- Установит Java 25 (Temurin)
-- Установит зависимости (screen, curl, jq)
-- Распакует ассеты
-- Откроет порт в файрволе
-- Запустит сервер в screen-сессии
+## Авторизация (при первом запуске)
 
-## Управление сервером
+После загрузки сервера нужно один раз авторизовать его:
+
+```bash
+# Подключись к консоли сервера
+screen -r hytale
+
+# Введи команду
+/auth login device
+
+# Следуй инструкциям:
+# 1. Открой ссылку в браузере
+# 2. Введи код
+# 3. Разреши доступ
+
+# После успешной авторизации — сохрани токен:
+/auth persistence encrypted
+
+# Отключись от консоли: Ctrl+A, D
+```
+
+После этого сервер будет автоматически авторизоваться при каждом запуске.
+
+## Управление
 
 ```bash
 # Запуск / перезапуск
@@ -66,34 +89,18 @@ sudo bash setup.sh --status
 # Бэкап мира
 sudo bash setup.sh --backup
 
-# Обновить плагины
+# Обновить сервер (через downloader)
 sudo bash setup.sh --update
 ```
 
-## Подключение к консоли
+## Консоль сервера
 
 ```bash
 # Подключиться
 screen -r hytale
 
-# Отключиться (не останавливая сервер)
+# Отключиться (сервер продолжит работать)
 Ctrl+A, D
-```
-
-## Авторизация
-
-После первого запуска в консоли сервера:
-
-```
-/auth login device
-```
-
-Следуй инструкциям — открой ссылку в браузере и введи код.
-
-Для сохранения токена (чтобы не авторизоваться заново):
-
-```
-/auth persistence encrypted
 ```
 
 ## Подключение клиента
@@ -102,30 +109,31 @@ Ctrl+A, D
 2. Multiplayer → Direct Connect
 3. Введи: `<IP_сервера>:5520`
 
+## Добавление плагинов
+
+Загрузи `.jar` файл плагина в `/opt/hytale-server/mods/` и перезапусти:
+
+```bash
+scp my-plugin.jar root@<IP>:/opt/hytale-server/mods/
+sudo bash setup.sh  # авто-перезапуск
+```
+
 ## Порты
 
-- **5520/UDP** — основной порт сервера (QUIC)
+- **5520/UDP** — основной порт (QUIC)
 
-Если сервер за роутером — пробрось UDP порт 5520.
+Если VDS за NAT/файрволом — убедись что UDP порт 5520 открыт в панели управления VDS.
 
 ## Структура файлов
 
 ```
 /opt/hytale-server/
-├── Assets.zip          # Ассеты сервера
-├── HytaleAssets/       # Распакованные ассеты
-├── HytaleServer.jar    # JAR сервера
-├── mods/               # Плагины (.jar)
-├── universe/           # Мир и данные игроков
-├── backups/            # Бэкапы
-└── config.json         # Конфигурация сервера
-```
-
-## Добавление плагинов
-
-Просто загрузи `.jar` файл плагина в `/opt/hytale-server/mods/` и перезапусти сервер:
-
-```bash
-scp my-plugin.jar user@<IP>:/opt/hytale-server/mods/
-sudo bash setup.sh --update
+├── Assets.zip           # Ассеты сервера (~3.3 GB)
+├── HytaleServer.jar     # JAR сервера
+├── mods/                # Плагины (.jar)
+├── universe/            # Мир и данные игроков
+├── backups/             # Бэкапы
+├── .downloader/         # Hytale Downloader
+├── config.json          # Конфигурация сервера
+└── server.log           # Логи
 ```
