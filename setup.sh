@@ -130,23 +130,60 @@ download_downloader() {
 
     unzip -q "$DOWNLOADER_ZIP" -d "$DOWNLOADER_DIR"
 
-    # Находим бинарник и делаем исполняемем
-    local bin
-    bin=$(find "$DOWNLOADER_DIR" -maxdepth 2 -type f -name "hytale-downloader*" ! -name "*.zip" | head -1)
+    # Находим бинарник (ТОЛЬКО Linux, не .exe) и делаем исполняемым
+    local bin arch
+    arch=$(uname -m | tr '[:upper:]' '[:lower:]')
+    case "$arch" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+    esac
+    bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+        -name "hytale-downloader-linux-${arch}" 2>/dev/null | head -1)
+    if [ -z "$bin" ]; then
+        bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+            -name "hytale-downloader-linux-*" ! -name "*.exe" 2>/dev/null | head -1)
+    fi
+    if [ -z "$bin" ]; then
+        bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+            -name "hytale-downloader*" ! -name "*.exe" ! -name "*.zip" 2>/dev/null | head -1)
+    fi
     if [ -n "$bin" ]; then
         chmod +x "$bin"
-        # Создаём симлинк для удобства
         ln -sf "$bin" "$DOWNLOADER_DIR/hytale-downloader"
     fi
 
     log_info "Downloader скачан и готов"
 }
 
-# ─── Поиск бинарника downloader ───
+# ─── Поиск бинарника downloader (только Linux) ───
 find_downloader_bin() {
-    local bin
-    bin=$(find "$DOWNLOADER_DIR" -maxdepth 2 -type f -name "hytale-downloader*" ! -name "*.zip" | head -1)
-    if [ -n "$bin" ] && [ -x "$bin" ]; then
+    local bin=""
+    local uname_str arch
+    uname_str=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m | tr '[:upper:]' '[:lower:]')
+    case "$arch" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+    esac
+
+    # Точное совпадение: OS + архитектура
+    bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+        -name "hytale-downloader-${uname_str}-${arch}" 2>/dev/null | head -1)
+
+    # Fallback: любой linux-бинарник
+    if [ -z "$bin" ]; then
+        bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+            -name "hytale-downloader-${uname_str}-*" ! -name "*.exe" 2>/dev/null | head -1)
+    fi
+
+    # Fallback: вообще любой не-exe
+    if [ -z "$bin" ]; then
+        bin=$(find "$DOWNLOADER_DIR" -maxdepth 3 -type f \
+            -name "hytale-downloader*" ! -name "*.exe" ! -name "*.zip" 2>/dev/null | head -1)
+    fi
+
+    if [ -n "$bin" ]; then
+        chmod +x "$bin" 2>/dev/null
         echo "$bin"
         return 0
     fi
