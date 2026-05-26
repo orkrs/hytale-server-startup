@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================
-#  Hytale Server Setup & Launch Script v2.0
+#  Hytale Server Setup & Launch Script v2.2
 #  Полностью автоматическая установка и запуск
-#  Hytale Dedicated Server на Ubuntu VDS
+#  Hytale Dedicated Server 0.5.0 на Ubuntu VDS (Java 25)
 #
 #  Запуск:  bash setup.sh
 #           bash setup.sh --update    (обновить сервер/ассеты)
@@ -18,6 +18,7 @@ set -e
 SERVER_DIR="/opt/hytale-server"
 ASSETS_ZIP="$SERVER_DIR/Assets.zip"
 SERVER_JAR="$SERVER_DIR/HytaleServer.jar"
+SERVER_AOT="$SERVER_DIR/HytaleServer.aot"
 MODS_DIR="$SERVER_DIR/mods"
 UNIVERSE_DIR="$SERVER_DIR/universe"
 BACKUP_DIR="$SERVER_DIR/backups"
@@ -26,6 +27,7 @@ SERVER_PORT=5520
 DOWNLOADER_URL="https://downloader.hytale.com/hytale-downloader.zip"
 DOWNLOADER_DIR="$SERVER_DIR/.downloader"
 DOWNLOADER_ZIP="$DOWNLOADER_DIR/hytale-downloader.zip"
+CONFIG_FILE="$SERVER_DIR/config.json"
 
 # Цвета
 RED='\033[0;31m'
@@ -40,6 +42,72 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step()  { echo -e "${BLUE}[STEP]${NC} $1"; }
 log_ok()    { echo -e "${CYAN}[OK]${NC} $1"; }
+
+# ─── Динамическое определение ресурсов VDS ───
+detect_resources() {
+    # Общее ОЗУ в МБ
+    local total_ram_kb
+    total_ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    TOTAL_RAM_MB=$(( total_ram_kb / 1024 ))
+
+    # Количество ядер CPU
+    CPU_CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+
+    log_info "Обнаружено: ${TOTAL_RAM_MB} МБ ОЗУ, ${CPU_CORES} ядер CPU"
+}
+
+# ─── Вычисление оптимальных JVM-аргументов ───
+compute_jvm_args() {
+    local ram_mb="$TOTAL_RAM_MB"
+    local cores="$CPU_CORES"
+
+    # ── Расчёт -Xmx (макс. 75% ОЗУ) ──
+    local xmx_mb
+    if [ "$ram_mb" -lt 2048 ]; then
+        # < 2 ГБ: жёсткий лимит 1024M
+        xmx_mb=1024
+    else
+        # 75% от общего ОЗУ
+        xmx_mb=$(( ram_mb * 75 / 100 ))
+    fi
+
+    # Формируем строку размера кучи
+    if [ "$xmx_mb" -ge 1024 ]; then
+        local xmx_g=$(( xmx_mb / 1024 ))
+        local xmx_rem=$(( xmx_mb % 1024 ))
+        if [ "$xmx_rem" -eq 0 ]; then
+            HEAP_SIZE="-Xmx${xmx_g}G"
+        else
+            HEAP_SIZE="-Xmx${xmx_mb}M"
+        fi
+    else
+        HEAP_SIZE="-Xmx${xmx_mb}M"
+    fi
+
+    # ── Выбор GC в зависимости от ресурсов ──
+    if [ "$ram_mb" -lt 2048 ] || [ "$cores" -le 1 ]; then
+        # Serial GC для слабых VDS
+        GC_ARGS="-XX:+UseSerialGC"
+        log_info "GC: SerialGC (слабая конфигурация)"
+    elif [ "$ram_mb" -ge 5120 ]; then
+        # ZGC для мощных VDS (5+ ГБ)
+        GC_ARGS="-XX:+UseZGC -XX:+ZGenerational"
+        log_info "GC: Generational ZGC (высокая конфигурация)"
+    else
+        # G1GC для средних VDS (2–4.5 ГБ)
+        GC_ARGS="-XX:+UseG1GC \
+-XX:MaxGCPauseMillis=20 \
+-XX:InitiatingHeapOccupancyPercent=45 \
+-XX:G1ReservePercent=15 \
+-XX:MaxMetaspaceSize=256M"
+        log_info "GC: G1GC оптимизированный (${HEAP_SIZE})"
+    fi
+
+    # ── Флаг Java 25 для подавления restricted access warnings ──
+    NATIVE_ACCESS_FLAG="--enable-native-access=ALL-UNNAMED"
+
+    log_info "JVM Heap: $HEAP_SIZE"
+}
 
 # ─── Проверка root ───
 check_root() {
@@ -315,6 +383,63 @@ setup_firewall() {
     fi
 }
 
+# ─── Сетевая оптимизация ядра Linux (UDP/QUIC буферы) ───
+optimize_network() {
+    log_step "Оптимизация сетевых буферов UDP/QUIC..."
+
+    local sysctl_file="/etc/sysctl.conf"
+    local changed=false
+
+    # Проверяем и добавляем rmem_max
+    if ! grep -q "^net\.core\.rmem_max" "$sysctl_file" 2>/dev/null; then
+        echo "net.core.rmem_max = 26214400" >> "$sysctl_file"
+        changed=true
+    fi
+
+    # Проверяем и добавляем wmem_max
+    if ! grep -q "^net\.core\.wmem_max" "$sysctl_file" 2>/dev/null; then
+        echo "net.core.wmem_max = 26214400" >> "$sysctl_file"
+        changed=true
+    fi
+
+    if [ "$changed" = true ]; then
+        sysctl -p 2>&1 >/dev/null
+        log_info "UDP буферы увеличены до 25 МБ (rmem_max/wmem_max)"
+    else
+        log_ok "UDP буферы уже настроены"
+    fi
+}
+
+# ─── Генерация / обновление config.json ───
+generate_config() {
+    # Если config.json уже существует — не перезаписываем
+    if [ -f "$CONFIG_FILE" ]; then
+        log_ok "config.json уже существует, пропускаем генерацию"
+        return
+    fi
+
+    log_step "Генерация config.json (Hytale 0.5.0)..."
+
+    cat > "$CONFIG_FILE" <<'CONFIGEOF'
+{
+    "MaxPlayers": 20,
+    "MaxViewRadius": 4,
+    "ServerPort": 5520,
+    "ServerAddress": "0.0.0.0",
+    "Modules": {
+        "Hytale:Farming": { "Enabled": false },
+        "Hytale:NPCEditor": { "Enabled": false },
+        "Hytale:BuilderTools": { "Enabled": false },
+        "Hytale:ObjectiveShop": { "Enabled": false },
+        "Hytale:LANDiscovery": { "Enabled": false },
+        "Hytale:CreativeHub": { "Enabled": false }
+    }
+}
+CONFIGEOF
+
+    log_info "config.json создан (MaxPlayers=20, ViewRadius=4, модули отключены)"
+}
+
 # ─── Проверка что сервер запущен ───
 is_running() {
     screen -list | grep -q "$SCREEN_NAME"
@@ -347,29 +472,23 @@ start_server() {
         done
     fi
 
-    log_step "Запуск Hytale Server..."
+    # Определяем ресурсы и вычисляем JVM-аргументы
+    detect_resources
+    compute_jvm_args
 
+    log_step "Запуск Hytale Server (Java 25, $HEAP_SIZE)..."
+
+    # Формируем полную команду запуска
+    # shellcheck disable=SC2086
     screen -dmS "$SCREEN_NAME" bash -c "
         cd '$SERVER_DIR'
         exec java \
-            -Xmx4G \
-            -XX:+UseG1GC \
+            $NATIVE_ACCESS_FLAG \
+            $HEAP_SIZE \
+            $GC_ARGS \
             -XX:+ParallelRefProcEnabled \
-            -XX:MaxGCPauseMillis=200 \
-            -XX:+UnlockExperimentalVMOptions \
             -XX:+DisableExplicitGC \
-            -XX:G1NewSizePercent=30 \
-            -XX:G1MaxNewSizePercent=40 \
-            -XX:G1HeapRegionSize=8M \
-            -XX:G1ReservePercent=20 \
-            -XX:G1HeapWastePercent=5 \
-            -XX:G1MixedGCCountTarget=4 \
-            -XX:InitiatingHeapOccupancyPercent=15 \
-            -XX:G1MixedGCLiveThresholdPercent=90 \
-            -XX:G1RSetUpdatingPauseTimePercent=5 \
-            -XX:SurvivorRatio=32 \
             -XX:+PerfDisableSharedMem \
-            -XX:MaxTenuringThreshold=1 \
             -Djava.net.preferIPv4Stack=true \
             -jar '$SERVER_JAR' \
             --assets '$ASSETS_ZIP' \
@@ -407,10 +526,12 @@ start_server() {
 
     echo ""
     echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  Hytale Server запущен!                                    ║${NC}"
+    echo -e "${GREEN}║  Hytale Server 0.5.0 запущен!                              ║${NC}"
     echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║  Локальный:  $local_ip:$SERVER_PORT                          ${NC}"
     echo -e "${GREEN}║  Внешний:    $ext_ip:$SERVER_PORT                            ${NC}"
+    echo -e "${GREEN}║  ОЗУ:        ${TOTAL_RAM_MB} МБ | Ядра: ${CPU_CORES}                        ${NC}"
+    echo -e "${GREEN}║  JVM:        $HEAP_SIZE | $(echo $GC_ARGS | awk '{print $1}' | sed 's/-XX:+Use//')  ${NC}"
     echo -e "${GREEN}║                                                            ║${NC}"
     echo -e "${GREEN}║  Консоль:    screen -r $SCREEN_NAME                              ${NC}"
     echo -e "${GREEN}║  Отключиться от консоли: Ctrl+A, D                         ║${NC}"
@@ -528,29 +649,24 @@ update_server() {
         sleep 2
     fi
 
+    # Бэкап перед обновлением
+    backup_world
+
     local dl_bin
     dl_bin=$(find_downloader_bin) || {
         log_error "Downloader не найден"
         return 1
     }
 
-    log_info "Запуск downloader для обновления..."
+    log_info "Запуск downloader для обновления (последняя версия release)..."
     cd "$SERVER_DIR"
-    "$dl_bin" 2>&1
+    "$dl_bin" --patchline release 2>&1
 
-    # Перемещаем новые файлы
-    local found_jar
-    found_jar=$(find "$SERVER_DIR" -name "HytaleServer.jar" 2>/dev/null | head -1)
-    if [ -n "$found_jar" ] && [ "$found_jar" != "$SERVER_JAR" ]; then
-        cp "$found_jar" "$SERVER_JAR"
-        log_info "HytaleServer.jar обновлён"
-    fi
-
-    local found_assets
-    found_assets=$(find "$SERVER_DIR" -name "Assets.zip" 2>/dev/null | head -1)
-    if [ -n "$found_assets" ] && [ "$found_assets" != "$ASSETS_ZIP" ]; then
-        cp "$found_assets" "$ASSETS_ZIP"
-        log_info "Assets.zip обновлён"
+    # Распаковываем новый архив
+    if extract_server_archive; then
+        log_info "Сервер обновлён успешно"
+    else
+        log_warn "Downloader завершился, но архив не найден. Проверь вручную."
     fi
 
     log_info "Обновление завершено. Запусти сервер: sudo bash setup.sh"
@@ -617,6 +733,7 @@ main() {
     install_deps
     create_dirs
     setup_firewall
+    optimize_network
 
     # Скачиваем downloader
     download_downloader
@@ -628,6 +745,9 @@ main() {
             exit 0
         fi
     fi
+
+    # Генерируем config.json если нет
+    generate_config
 
     start_server
 }
