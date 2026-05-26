@@ -81,7 +81,7 @@ install_java() {
     log_step "Установка Java 25 (Temurin/Adoptium)..."
 
     apt-get update -qq
-    apt-get install -y -qq wget apt-transport-2>&1
+    apt-get install -y -qq wget apt-transport-https 2>&1
 
     # Добавляем репозиторий Adoptium
     mkdir -p /etc/apt/keyrings
