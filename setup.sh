@@ -213,21 +213,29 @@ download_server_files() {
     cd "$SERVER_DIR"
     "$dl_bin" 2>&1
 
-    # Ищем скачанные файлы
+    # Ищем скачанный архив сервера (формат: 2026.03.26-xxxxx.zip)
     local server_zip
-    server_zip=$(find "$SERVER_DIR" -maxdepth 2 -name "HytaleServer*.zip" -o -name "hytale-server*.zip" 2>/dev/null | head -1)
+    server_zip=$(find "$SERVER_DIR" -maxdepth 2 -name "2026.*.zip" -o -name "HytaleServer*.zip" -o -name "hytale-server*.zip" 2>/dev/null | head -1)
 
     if [ -n "$server_zip" ] && [ -f "$server_zip" ]; then
         log_info "Распаковка сервера из $server_zip..."
         unzip -q -o "$server_zip" -d "$SERVER_DIR"
     fi
 
-    # Перемещаем файлы если они в подпапке
+    # Перемещаем файлы из подпапки Server/
     if [ -f "$SERVER_DIR/Server/HytaleServer.jar" ]; then
         mv "$SERVER_DIR/Server/HytaleServer.jar" "$SERVER_JAR"
     fi
     if [ -f "$SERVER_DIR/Server/Assets.zip" ]; then
         mv "$SERVER_DIR/Server/Assets.zip" "$ASSETS_ZIP"
+    fi
+    # Перемещаем AOT если есть
+    if [ -f "$SERVER_DIR/Server/HytaleServer.aot" ]; then
+        mv "$SERVER_DIR/Server/HytaleServer.aot" "$SERVER_DIR/HytaleServer.aot"
+    fi
+    # Удаляем распакованную папку Server/ если она пуста
+    if [ -d "$SERVER_DIR/Server" ]; then
+        rmdir "$SERVER_DIR/Server" 2>/dev/null || true
     fi
 
     # Проверяем результат
